@@ -1,6 +1,7 @@
 #include "services/adsb_client.h"
 
 #include <HTTPClient.h>
+#include <WiFi.h>
 #include <WiFiClientSecure.h>
 
 #include <ArduinoJson.h>
@@ -8,6 +9,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <cmath>
 #include <cstring>
 
 #include "config.h"
@@ -49,22 +51,58 @@ void pollNetwork() {
   }
 }
 
+const char* httpClientErrorName(int code) {
+  switch (code) {
+    case HTTPC_ERROR_CONNECTION_REFUSED:
+      return "connection refused";
+    case HTTPC_ERROR_SEND_HEADER_FAILED:
+      return "send header failed";
+    case HTTPC_ERROR_SEND_PAYLOAD_FAILED:
+      return "send payload failed";
+    case HTTPC_ERROR_NOT_CONNECTED:
+      return "not connected";
+    case HTTPC_ERROR_CONNECTION_LOST:
+      return "connection lost";
+    case HTTPC_ERROR_NO_STREAM:
+      return "no stream";
+    case HTTPC_ERROR_NO_HTTP_SERVER:
+      return "no http server";
+    case HTTPC_ERROR_TOO_LESS_RAM:
+      return "not enough RAM";
+    case HTTPC_ERROR_ENCODING:
+      return "encoding";
+    case HTTPC_ERROR_STREAM_WRITE:
+      return "stream write";
+    case HTTPC_ERROR_READ_TIMEOUT:
+      return "read timeout";
+    default:
+      return "error";
+  }
+}
+
 int performGetWithPoll(HTTPClient& http) {
   http.setConnectTimeout(kConnectTimeoutMs);
   const unsigned long deadline = millis() + kRequestTimeoutMs;
+  int last_code = HTTPC_ERROR_READ_TIMEOUT;
+  bool logged_retry = false;
   while (millis() < deadline) {
     pollNetwork();
     const int code = http.GET();
     if (code > 0) {
       return code;
     }
+    last_code = code;
     if (code != HTTPC_ERROR_CONNECTION_REFUSED &&
         code != HTTPC_ERROR_NOT_CONNECTED) {
       return code;
     }
+    if (!logged_retry) {
+      Serial.printf("adsb: connect retry (%s)\n", httpClientErrorName(code));
+      logged_retry = true;
+    }
     delay(5);
   }
-  return HTTPC_ERROR_READ_TIMEOUT;
+  return last_code;
 }
 
 /**
@@ -241,6 +279,38 @@ void fillTagFields(Aircraft* ac, const JsonObject& plane) {
   formatAltitudeTag(plane, ac->alt, sizeof(ac->alt));
 }
 
+const char* jsonNumberKind(JsonVariantConst value) {
+  if (value.isNull()) {
+    return "missing";
+  }
+  if (value.is<float>() || value.is<double>()) {
+    return "float";
+  }
+  if (value.is<int>()) {
+    return "int";
+  }
+  if (value.is<const char*>()) {
+    return "string";
+  }
+  return "other";
+}
+
+void logDroppedPosition(const JsonObject& plane) {
+  char hex[9];
+  copyJsonStringTrimmed(plane, "hex", hex, sizeof(hex));
+  Serial.printf("adsb: dropped %s (lat %s, lon %s)\n", hex[0] != '\0' ? hex : "?",
+                jsonNumberKind(plane["lat"]), jsonNumberKind(plane["lon"]));
+}
+
+float approxDistKm(double center_lat, double center_lon, float lat, float lon) {
+  constexpr float kKmPerDeg = 111.0f;
+  constexpr float kDegToRad = 0.01745329252f;
+  const float dx = (lon - static_cast<float>(center_lon)) * kKmPerDeg *
+                   cosf(static_cast<float>(center_lat) * kDegToRad);
+  const float dy = (lat - static_cast<float>(center_lat)) * kKmPerDeg;
+  return sqrtf(dx * dx + dy * dy);
+}
+
 }  // namespace
 
 void init() {
@@ -286,8 +356,11 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   url += "/dist/";
   url += String(dist_nm, 1);
 
-  // Keep only the fields we render; the rest never reaches RAM.
+  // Keep only the fields we render, plus the status fields logged below.
+  // Everything else never reaches RAM.
   JsonDocument filter;
+  filter["msg"] = true;
+  filter["total"] = true;
   JsonObject f = filter["ac"].add<JsonObject>();
   for (const char* key :
        {"lat", "lon", "true_heading", "mag_heading", "track", "dir", "gs",
@@ -296,12 +369,21 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
     f[key] = true;
   }
 
+  Serial.printf(
+      "adsb: GET %.6f,%.6f radius %.1f km (%.1f nm) rssi %d  free %u largest %u\n",
+      center_lat, center_lon, fetch_radius_km, dist_nm, WiFi.RSSI(),
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  Serial.printf("adsb: %s\n", url.c_str());
+
   WiFiClientSecure client;
   client.setInsecure();
 
   HTTPClient http;
   if (!http.begin(client, url)) {
-    Serial.println("adsb: http.begin failed");
+    Serial.printf("adsb: http.begin failed  free %u largest %u\n",
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
     return false;
   }
 
@@ -313,16 +395,25 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   http.setTimeout(kRequestTimeoutMs);
   const int code = performGetWithPoll(http);
   if (code != HTTP_CODE_OK) {
-    Serial.printf("adsb: HTTP %d (free %u, largest %u)\n", code,
-                  static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    if (code < 0) {
+      Serial.printf("adsb: HTTP %d (%s)  free %u largest %u\n", code,
+                    httpClientErrorName(code),
+                    static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    } else {
+      Serial.printf("adsb: HTTP %d  free %u largest %u\n", code,
+                    static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    }
     http.end();
     return false;
   }
 
   NetworkClient* stream = http.getStreamPtr();
   if (stream == nullptr) {
-    Serial.println("adsb: no response stream");
+    Serial.printf("adsb: no response stream  free %u largest %u\n",
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
     http.end();
     return false;
   }
@@ -335,8 +426,9 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
           ? services::http::BodyFraming::kChunked
           : services::http::BodyFraming::kIdentity;
 
+  const int content_length = http.getSize();
   PollingSocketSource source(http, *stream, millis() + kRequestTimeoutMs);
-  BodyReader body(source, framing, http.getSize());
+  BodyReader body(source, framing, content_length);
   JsonDocument doc;
   const DeserializationError err =
       deserializeJson(doc, body, DeserializationOption::Filter(filter));
@@ -345,13 +437,20 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   // connection, but a prerequisite for ever reusing one.
   body.drain();
   http.end();
+  const char* framing_name =
+      framing == services::http::BodyFraming::kChunked ? "chunked" : "identity";
   if (err) {
     if (body.framingError()) {
-      Serial.println("adsb: malformed chunked body");
+      Serial.printf("adsb: malformed chunked body  bytes %u  content-length %d\n",
+                    static_cast<unsigned>(body.bytesRead()), content_length);
     } else if (body.bytesRead() == 0) {
-      Serial.println("adsb: empty response");
+      Serial.printf("adsb: empty response  content-length %d %s\n", content_length,
+                    framing_name);
     } else {
-      Serial.printf("adsb: JSON parse error: %s\n", err.c_str());
+      Serial.printf(
+          "adsb: JSON parse error: %s  bytes %u  content-length %d %s%s\n",
+          err.c_str(), static_cast<unsigned>(body.bytesRead()), content_length,
+          framing_name, body.truncated() ? " truncated" : "");
     }
     return false;
   }
@@ -360,16 +459,33 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   // thread never sees a half-updated list.
   Aircraft parsed[kMaxAircraft];
   size_t n = 0;
+  size_t in_feed = 0;
+  size_t skip_pos = 0;
+  size_t skip_ground = 0;
+  size_t skip_cap = 0;
+  float nearest_km = 0.0f;
+  bool have_nearest = false;
+  char nearest_id[9] = {};
+  float nearest_lat = 0.0f;
+  float nearest_lon = 0.0f;
+  const bool ac_present = doc["ac"].is<JsonArray>();
   JsonArray ac = doc["ac"].as<JsonArray>();
-  if (!ac.isNull()) {
+  if (ac_present) {
     for (JsonObject plane : ac) {
+      ++in_feed;
       if (n >= kMaxAircraft) {
-        break;
+        ++skip_cap;
+        continue;
       }
       if (!plane["lat"].is<float>() || !plane["lon"].is<float>()) {
+        if (skip_pos == 0) {
+          logDroppedPosition(plane);
+        }
+        ++skip_pos;
         continue;
       }
       if (isOnGround(plane) && !config::kAdsbShowGroundAircraft) {
+        ++skip_ground;
         continue;
       }
 
@@ -388,12 +504,52 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
       parsed[n].pos_age_ms = static_cast<uint32_t>(seen_pos * 1000.0f);
 
       fillTagFields(&parsed[n], plane);
+      const float dist_km =
+          approxDistKm(center_lat, center_lon, parsed[n].lat, parsed[n].lon);
+      if (!have_nearest || dist_km < nearest_km) {
+        nearest_km = dist_km;
+        have_nearest = true;
+        nearest_lat = parsed[n].lat;
+        nearest_lon = parsed[n].lon;
+        strncpy(nearest_id, parsed[n].callsign, sizeof(nearest_id) - 1);
+        nearest_id[sizeof(nearest_id) - 1] = '\0';
+      }
       ++n;
     }
   }
 
   publish(parsed, n);
-  Serial.printf("adsb: %u aircraft\n", static_cast<unsigned>(n));
+
+  char msg[49];
+  msg[0] = '\0';
+  if (doc["msg"].is<const char*>()) {
+    strncpy(msg, doc["msg"].as<const char*>(), sizeof(msg) - 1);
+    msg[sizeof(msg) - 1] = '\0';
+  }
+  int feed_total = -1;
+  if (doc["total"].is<int>() || doc["total"].is<float>()) {
+    feed_total = doc["total"].as<int>();
+  }
+
+  Serial.printf(
+      "adsb: kept %u/%u (ground %u, no-pos %u, cap %u)  bytes %u %s%s  "
+      "total %d  msg \"%s\"\n",
+      static_cast<unsigned>(n), static_cast<unsigned>(in_feed),
+      static_cast<unsigned>(skip_ground), static_cast<unsigned>(skip_pos),
+      static_cast<unsigned>(skip_cap), static_cast<unsigned>(body.bytesRead()),
+      framing_name, body.truncated() ? " truncated" : "", feed_total, msg);
+  if (!ac_present) {
+    Serial.println("adsb: response has no \"ac\" array");
+  }
+  if (n == 0 && in_feed > 0 && skip_ground == in_feed) {
+    Serial.println("adsb: all aircraft are on the ground and hidden");
+  }
+  if (have_nearest) {
+    Serial.printf(
+        "adsb: nearest %s at %.6f,%.6f (%.1f km, fetch radius %.1f km)\n",
+        nearest_id[0] != '\0' ? nearest_id : "?", nearest_lat, nearest_lon,
+        nearest_km, fetch_radius_km);
+  }
   return true;
 }
 

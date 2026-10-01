@@ -89,6 +89,8 @@ bool frameGateAllowsDraw() {
   }
   // Fetch task died or stalled. Draw again rather than freeze on the last frame.
   if (static_cast<int32_t>(millis() - s_pause_since_ms) > static_cast<int32_t>(kFetchPauseGiveUpMs)) {
+    Serial.printf("radar: fetch pause timed out after %lu ms, drawing again\n",
+                  static_cast<unsigned long>(millis() - s_pause_since_ms));
     s_frame_gate.store(static_cast<uint8_t>(FrameGate::kRun));
     return true;
   }
@@ -552,6 +554,43 @@ void sortBeyondDotsFarFirst(BeyondDotDrawItem* items, size_t count) {
   }
 }
 
+void logAircraftPlacement(size_t buffered, size_t on_screen, size_t edge_dots,
+                          unsigned long base_ms, float nearest_km,
+                          bool have_nearest) {
+  static size_t prev_buffered = static_cast<size_t>(-1);
+  static size_t prev_on_screen = static_cast<size_t>(-1);
+  static size_t prev_dots = static_cast<size_t>(-1);
+  static unsigned long prev_ms = 0;
+
+  const unsigned long now = millis();
+  const bool changed = buffered != prev_buffered || on_screen != prev_on_screen ||
+                       edge_dots != prev_dots;
+  const bool quiet = buffered == 0 || on_screen == 0;
+  if (!changed && !(quiet && now - prev_ms >= 5000)) {
+    return;
+  }
+  prev_buffered = buffered;
+  prev_on_screen = on_screen;
+  prev_dots = edge_dots;
+  prev_ms = now;
+
+  const unsigned long age_ms = base_ms == 0 ? 0 : now - base_ms;
+  Serial.printf(
+      "radar: draw buffer %u  on-screen %u  edge-dots %u  fetch-age %lu ms  "
+      "center %.6f,%.6f  ring %.1f km\n",
+      static_cast<unsigned>(buffered), static_cast<unsigned>(on_screen),
+      static_cast<unsigned>(edge_dots), age_ms, services::location::lat(),
+      services::location::lon(), radar::rangeCurrent().outer_km);
+  if (buffered == 0) {
+    Serial.println("radar: nothing in the aircraft buffer");
+  } else if (on_screen == 0 && edge_dots == 0) {
+    Serial.println("radar: buffer has aircraft but none mapped onto the display");
+  } else if (on_screen == 0 && have_nearest) {
+    Serial.printf("radar: no symbols inside the ring; nearest %.1f km (outer %.1f km)\n",
+                  nearest_km, radar::rangeCurrent().outer_km);
+  }
+}
+
 void drawAircraft() {
   initLabelMetrics();
 
@@ -565,6 +604,8 @@ void drawAircraft() {
   BeyondDotDrawItem dots[services::adsb::kMaxAircraft];
   size_t draw_count = 0;
   size_t dot_count = 0;
+  float nearest_km = 0.0f;
+  bool have_nearest = false;
 
   for (size_t i = 0; i < n; ++i) {
     // Dead-reckoned position for smooth motion between fetches.
@@ -576,6 +617,10 @@ void drawAircraft() {
     float dy_km = 0.0f;
     float dist_km = 0.0f;
     offsetKmFromCenter(lat, lon, &dx_km, &dy_km, &dist_km);
+    if (!have_nearest || dist_km < nearest_km) {
+      nearest_km = dist_km;
+      have_nearest = true;
+    }
 
     if (isInsideOuterRingKm(dist_km)) {
       int x = 0;
@@ -599,6 +644,8 @@ void drawAircraft() {
     dots[dot_count].dist_sq = distSqFromCenter(dot_x, dot_y);
     ++dot_count;
   }
+
+  logAircraftPlacement(n, draw_count, dot_count, base_ms, nearest_km, have_nearest);
 
   sortBeyondDotsFarFirst(dots, dot_count);
   for (size_t d = 0; d < dot_count; ++d) {
@@ -744,10 +791,15 @@ bool ensureFrameSprite() {
   // colors.
   s_frame.setColorDepth(lgfx::color_depth_t::rgb332_1Byte);
   if (!s_frame.createSprite(radar::kSize, radar::kSize)) {
-    Serial.println("radar: frame sprite alloc failed");
+    Serial.printf("radar: frame sprite alloc failed  free %u largest %u\n",
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
     return false;
   }
   s_frame_ready = true;
+  Serial.printf("radar: frame sprite ready  free %u largest %u\n",
+                static_cast<unsigned>(ESP.getFreeHeap()),
+                static_cast<unsigned>(ESP.getMaxAllocHeap()));
   return true;
 }
 
@@ -767,19 +819,34 @@ void renderFrame() {
 }  // namespace
 
 void radarDisplayPauseForFetch() {
+  const uint32_t started = millis();
+  Serial.printf("radar: pausing frame for fetch  free %u largest %u\n",
+                static_cast<unsigned>(ESP.getFreeHeap()),
+                static_cast<unsigned>(ESP.getMaxAllocHeap()));
   s_frame_gate.store(static_cast<uint8_t>(FrameGate::kPauseRequested));
   const uint32_t deadline = millis() + 1000;
   while (s_frame_gate.load() != static_cast<uint8_t>(FrameGate::kPaused)) {
     if (static_cast<int32_t>(millis() - deadline) >= 0) {
-      Serial.println("radar: frame not released for fetch");
+      Serial.printf(
+          "radar: frame still held after %lu ms  free %u largest %u\n",
+          static_cast<unsigned long>(millis() - started),
+          static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()));
       break;
     }
     delay(1);
+  }
+  if (s_frame_gate.load() == static_cast<uint8_t>(FrameGate::kPaused)) {
+    Serial.printf("radar: frame released in %lu ms  free %u largest %u\n",
+                  static_cast<unsigned long>(millis() - started),
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
   }
 }
 
 void radarDisplayResumeAfterFetch() {
   s_frame_gate.store(static_cast<uint8_t>(FrameGate::kRun));
+  Serial.println("radar: resuming draw");
 }
 
 void radarDisplayDraw() {

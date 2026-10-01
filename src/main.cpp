@@ -50,18 +50,47 @@ void handleBootButton() {
   }
 }
 
+const char* wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return "idle";
+    case WL_NO_SSID_AVAIL:
+      return "no ssid";
+    case WL_SCAN_COMPLETED:
+      return "scan done";
+    case WL_CONNECTED:
+      return "connected";
+    case WL_CONNECT_FAILED:
+      return "connect failed";
+    case WL_CONNECTION_LOST:
+      return "connection lost";
+    case WL_DISCONNECTED:
+      return "disconnected";
+    default:
+      return "unknown";
+  }
+}
+
 // ADS-B fetch runs on its own task. The HTTPS handshake needs the contiguous
 // heap the radar frame occupies, so the UI task frees that sprite for the
 // duration of the poll. The last frame stays on the panel; drawing resumes
 // once the aircraft list is published.
 void adsbFetchTask(void*) {
+  Serial.println("adsb: fetch task started");
+  bool reported_down = false;
   for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
+    const wl_status_t status = WiFi.status();
+    if (status == WL_CONNECTED) {
+      reported_down = false;
       ui::radarDisplayPauseForFetch();
       services::adsb::fetchUpdate(services::location::lat(),
                                   services::location::lon(),
                                   ui::radar::fetchRadiusKm());
       ui::radarDisplayResumeAfterFetch();
+    } else if (!reported_down) {
+      Serial.printf("adsb: skip fetch, WiFi %s (%d)\n", wifiStatusName(status),
+                    static_cast<int>(status));
+      reported_down = true;
     }
     vTaskDelay(pdMS_TO_TICKS(config::kAdsbFetchIntervalMs));
   }
@@ -84,6 +113,13 @@ void setup() {
   services::location::init();
   ui::radar::rangeInit();
   services::adsb::init();
+  char range_label[12];
+  ui::radar::formatCurrentRing3Label(range_label, sizeof(range_label));
+  Serial.printf(
+      "Radar: range %s  outer %.1f km  fetch %.1f km  free %u largest %u\n",
+      range_label, ui::radar::rangeCurrent().outer_km, ui::radar::fetchRadiusKm(),
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(ESP.getMaxAllocHeap()));
 
   if (wifiSetupConnect()) {
     showRadarIfConnected();
