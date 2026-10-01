@@ -60,8 +60,10 @@ void init() {
     }
   }
   prefs.end();
-  Serial.printf("Radar location: %.6f, %.6f (%s)\n", s_lat, s_lon,
-                loaded ? "saved" : "default");
+  if (config::kDebugLog) {
+    Serial.printf("Radar location: %.6f, %.6f (%s)\n", s_lat, s_lon,
+                  loaded ? "saved" : "default");
+  }
 }
 
 double lat() { return s_lat; }

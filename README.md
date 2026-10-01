@@ -116,6 +116,8 @@ The PlatformIO environment uses [pioarduino](https://github.com/pioarduino/platf
 
 Hardware pins and timing live in `include/config.h`. Range presets live in `include/ui/radar_range.h`.
 
+`config::kDebugLog` is false. Set it to true and rebuild to print the extra ADS-B fetch and radar-draw lines (request URL, drop reasons, heap around the frame sprite, and why the screen is empty).
+
 ## License
 
 MIT. Original copyright (c) 2026 MatixYo. See `LICENSE`.
