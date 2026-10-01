@@ -4,7 +4,9 @@
 #include <lgfx/v1/lgfx_fonts.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 
 #include "config.h"
@@ -53,6 +55,45 @@ int s_scale_label_h = 0;
 lgfx::LovyanGFX* s_draw = &tft;
 LGFX_Sprite s_frame(&tft);
 bool s_frame_ready = false;
+
+/**
+ * The 240×240 frame is the largest contiguous block left after Wi-Fi starts.
+ * It has to be given back before WiFiClientSecure builds a TLS session, or
+ * the HTTPS poll fails and the grid stays empty. The fetch task asks for that
+ * pause; only this task (the one that draws) frees the sprite.
+ */
+enum class FrameGate : uint8_t { kRun = 0, kPauseRequested = 1, kPaused = 2 };
+std::atomic<uint8_t> s_frame_gate{static_cast<uint8_t>(FrameGate::kRun)};
+uint32_t s_pause_since_ms = 0;
+constexpr uint32_t kFetchPauseGiveUpMs = 15000;
+
+void releaseFrameSprite() {
+  if (!s_frame_ready) {
+    return;
+  }
+  s_frame.deleteSprite();
+  s_frame_ready = false;
+}
+
+/** False while a fetch owns the heap the frame would occupy. */
+bool frameGateAllowsDraw() {
+  const uint8_t gate = s_frame_gate.load();
+  if (gate == static_cast<uint8_t>(FrameGate::kRun)) {
+    return true;
+  }
+  if (gate == static_cast<uint8_t>(FrameGate::kPauseRequested)) {
+    releaseFrameSprite();
+    s_pause_since_ms = millis();
+    s_frame_gate.store(static_cast<uint8_t>(FrameGate::kPaused));
+    return false;
+  }
+  // Fetch task died or stalled. Draw again rather than freeze on the last frame.
+  if (static_cast<int32_t>(millis() - s_pause_since_ms) > static_cast<int32_t>(kFetchPauseGiveUpMs)) {
+    s_frame_gate.store(static_cast<uint8_t>(FrameGate::kRun));
+    return true;
+  }
+  return false;
+}
 
 class DrawScope {
  public:
@@ -696,10 +737,11 @@ bool ensureFrameSprite() {
   if (s_frame_ready) {
     return true;
   }
-  // RGB332 is 57 KB of DMA SRAM. RGB565 is 115 KB, and this board has no
-  // PSRAM. After Wi-Fi is up, that 16-bit frame leaves no contiguous heap for
-  // the TLS buffers the ADS-B client needs: the grid draws, and no aircraft
-  // ever arrive. The radar palette fits in 256 colors.
+  // RGB332 is 57 KB. RGB565 is 115 KB, and this board has no PSRAM. After
+  // Wi-Fi is up that block is the one WiFiClientSecure needs for TLS, so the
+  // fetch task has the UI drop the sprite before each poll and this path
+  // allocates it again once the response is parsed. The palette fits in 256
+  // colors.
   s_frame.setColorDepth(lgfx::color_depth_t::rgb332_1Byte);
   if (!s_frame.createSprite(radar::kSize, radar::kSize)) {
     Serial.println("radar: frame sprite alloc failed");
@@ -724,7 +766,26 @@ void renderFrame() {
 
 }  // namespace
 
+void radarDisplayPauseForFetch() {
+  s_frame_gate.store(static_cast<uint8_t>(FrameGate::kPauseRequested));
+  const uint32_t deadline = millis() + 1000;
+  while (s_frame_gate.load() != static_cast<uint8_t>(FrameGate::kPaused)) {
+    if (static_cast<int32_t>(millis() - deadline) >= 0) {
+      Serial.println("radar: frame not released for fetch");
+      break;
+    }
+    delay(1);
+  }
+}
+
+void radarDisplayResumeAfterFetch() {
+  s_frame_gate.store(static_cast<uint8_t>(FrameGate::kRun));
+}
+
 void radarDisplayDraw() {
+  if (!frameGateAllowsDraw()) {
+    return;
+  }
   initPalette();
   initLabelMetrics();
 
@@ -741,6 +802,9 @@ void radarDisplayDraw() {
 }
 
 void radarDisplayRefreshAircraft() {
+  if (!frameGateAllowsDraw()) {
+    return;
+  }
   initPalette();
 
   if (ensureFrameSprite()) {

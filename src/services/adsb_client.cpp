@@ -313,7 +313,9 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   http.setTimeout(kRequestTimeoutMs);
   const int code = performGetWithPoll(http);
   if (code != HTTP_CODE_OK) {
-    Serial.printf("adsb: HTTP %d\n", code);
+    Serial.printf("adsb: HTTP %d (free %u, largest %u)\n", code,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
     http.end();
     return false;
   }
