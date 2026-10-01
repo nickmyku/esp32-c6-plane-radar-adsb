@@ -21,6 +21,8 @@ After Wi-Fi is saved, the device reconnects on its own. Aircraft positions updat
 
 Holding BOOT at power-on also forces a credential reset.
 
+A tap is a touch held for about 40–800 ms. The CST816S is kept awake so later taps still register. If a poll fails, the firmware restarts the I2C bus and, after repeated failures, resets the controller. The serial log then shows `Touch: I2C stuck — resetting CST816S`. If the chip is missing, the log says `Touch: CST816S not found` and the BOOT button still cycles range.
+
 ## Wi-Fi setup portal
 
 **First-time setup** (no saved Wi-Fi):
@@ -33,7 +35,7 @@ The same portal stays available later at **`http://plane-radar.local`** or the d
 
 ## Flash
 
-The merged image is `firmware/plane-radar-esp32-c6-touch-lcd-1.28.bin`.
+The merged image checked into the repo is `firmware/plane-radar-esp32-c6-touch-lcd-1.28.bin`. `firmware/plane-radar-esp32-c6-touch-lcd-1.28.bin.sha256` is its SHA-256.
 
 | Setting | Value |
 |---------|--------|
@@ -44,6 +46,12 @@ The merged image is `firmware/plane-radar-esp32-c6-touch-lcd-1.28.bin`.
 | Offset | `0x0` |
 
 Those match the header of Waveshare’s factory image for this board. The Type-C port is the ESP32-C6 USB Serial/JTAG controller.
+
+Check the file before flashing:
+
+```bash
+cd firmware && sha256sum -c plane-radar-esp32-c6-touch-lcd-1.28.bin.sha256
+```
 
 With [esptool](https://github.com/espressif/esptool):
 
@@ -85,7 +93,22 @@ pio run -e c6touch
 pio run -t merge -e c6touch
 ```
 
-The merged file is also written to `.pio/build/c6touch/firmware-merged.bin`. `scripts/merge-firmware.sh` copies it to `release/plane-radar-merged.bin`.
+The merge writes `.pio/build/c6touch/firmware-merged.bin` (bootloader, partition table, and app, ready to flash at `0x0`). `scripts/merge-firmware.sh` does that build and copies the image to `release/plane-radar-merged.bin`, which is not committed.
+
+After a source change, replace the image in `firmware/` and rewrite its checksum:
+
+```bash
+scripts/merge-firmware.sh -o firmware/plane-radar-esp32-c6-touch-lcd-1.28.bin
+(
+  cd firmware
+  sha256sum plane-radar-esp32-c6-touch-lcd-1.28.bin \
+    > plane-radar-esp32-c6-touch-lcd-1.28.bin.sha256
+)
+```
+
+GitHub Actions builds the same merged image on every push. A `v*` tag publishes that image and its `.sha256` on the GitHub Release.
+
+The radar frame is RGB332. This board has no PSRAM, and a 240×240 RGB565 sprite is 115 KB of DMA SRAM. After Wi-Fi starts, that allocation leaves no contiguous heap for the ADS-B TLS buffers: the grid still draws, and no aircraft arrive. RGB332 is 57 KB and fits the palette the display uses.
 
 The PlatformIO environment uses [pioarduino](https://github.com/pioarduino/platform-espressif32) so the Arduino-ESP32 3.x core (required by this chip) is available. Official PlatformIO’s espressif32 platform does not build Arduino sketches for the ESP32-C6.
 
