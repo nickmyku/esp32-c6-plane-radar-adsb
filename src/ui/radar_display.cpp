@@ -89,8 +89,10 @@ bool frameGateAllowsDraw() {
   }
   // Fetch task died or stalled. Draw again rather than freeze on the last frame.
   if (static_cast<int32_t>(millis() - s_pause_since_ms) > static_cast<int32_t>(kFetchPauseGiveUpMs)) {
-    Serial.printf("radar: fetch pause timed out after %lu ms, drawing again\n",
-                  static_cast<unsigned long>(millis() - s_pause_since_ms));
+    if (config::kDebugLog) {
+      Serial.printf("radar: fetch pause timed out after %lu ms, drawing again\n",
+                    static_cast<unsigned long>(millis() - s_pause_since_ms));
+    }
     s_frame_gate.store(static_cast<uint8_t>(FrameGate::kRun));
     return true;
   }
@@ -557,6 +559,9 @@ void sortBeyondDotsFarFirst(BeyondDotDrawItem* items, size_t count) {
 void logAircraftPlacement(size_t buffered, size_t on_screen, size_t edge_dots,
                           unsigned long base_ms, float nearest_km,
                           bool have_nearest) {
+  if (!config::kDebugLog) {
+    return;
+  }
   static size_t prev_buffered = static_cast<size_t>(-1);
   static size_t prev_on_screen = static_cast<size_t>(-1);
   static size_t prev_dots = static_cast<size_t>(-1);
@@ -617,7 +622,7 @@ void drawAircraft() {
     float dy_km = 0.0f;
     float dist_km = 0.0f;
     offsetKmFromCenter(lat, lon, &dx_km, &dy_km, &dist_km);
-    if (!have_nearest || dist_km < nearest_km) {
+    if (config::kDebugLog && (!have_nearest || dist_km < nearest_km)) {
       nearest_km = dist_km;
       have_nearest = true;
     }
@@ -791,15 +796,21 @@ bool ensureFrameSprite() {
   // colors.
   s_frame.setColorDepth(lgfx::color_depth_t::rgb332_1Byte);
   if (!s_frame.createSprite(radar::kSize, radar::kSize)) {
-    Serial.printf("radar: frame sprite alloc failed  free %u largest %u\n",
-                  static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    if (config::kDebugLog) {
+      Serial.printf("radar: frame sprite alloc failed  free %u largest %u\n",
+                    static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    } else {
+      Serial.println("radar: frame sprite alloc failed");
+    }
     return false;
   }
   s_frame_ready = true;
-  Serial.printf("radar: frame sprite ready  free %u largest %u\n",
-                static_cast<unsigned>(ESP.getFreeHeap()),
-                static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  if (config::kDebugLog) {
+    Serial.printf("radar: frame sprite ready  free %u largest %u\n",
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  }
   return true;
 }
 
@@ -820,23 +831,30 @@ void renderFrame() {
 
 void radarDisplayPauseForFetch() {
   const uint32_t started = millis();
-  Serial.printf("radar: pausing frame for fetch  free %u largest %u\n",
-                static_cast<unsigned>(ESP.getFreeHeap()),
-                static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  if (config::kDebugLog) {
+    Serial.printf("radar: pausing frame for fetch  free %u largest %u\n",
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  }
   s_frame_gate.store(static_cast<uint8_t>(FrameGate::kPauseRequested));
   const uint32_t deadline = millis() + 1000;
   while (s_frame_gate.load() != static_cast<uint8_t>(FrameGate::kPaused)) {
     if (static_cast<int32_t>(millis() - deadline) >= 0) {
-      Serial.printf(
-          "radar: frame still held after %lu ms  free %u largest %u\n",
-          static_cast<unsigned long>(millis() - started),
-          static_cast<unsigned>(ESP.getFreeHeap()),
-          static_cast<unsigned>(ESP.getMaxAllocHeap()));
+      if (config::kDebugLog) {
+        Serial.printf(
+            "radar: frame still held after %lu ms  free %u largest %u\n",
+            static_cast<unsigned long>(millis() - started),
+            static_cast<unsigned>(ESP.getFreeHeap()),
+            static_cast<unsigned>(ESP.getMaxAllocHeap()));
+      } else {
+        Serial.println("radar: frame not released for fetch");
+      }
       break;
     }
     delay(1);
   }
-  if (s_frame_gate.load() == static_cast<uint8_t>(FrameGate::kPaused)) {
+  if (config::kDebugLog &&
+      s_frame_gate.load() == static_cast<uint8_t>(FrameGate::kPaused)) {
     Serial.printf("radar: frame released in %lu ms  free %u largest %u\n",
                   static_cast<unsigned long>(millis() - started),
                   static_cast<unsigned>(ESP.getFreeHeap()),
@@ -846,7 +864,9 @@ void radarDisplayPauseForFetch() {
 
 void radarDisplayResumeAfterFetch() {
   s_frame_gate.store(static_cast<uint8_t>(FrameGate::kRun));
-  Serial.println("radar: resuming draw");
+  if (config::kDebugLog) {
+    Serial.println("radar: resuming draw");
+  }
 }
 
 void radarDisplayDraw() {

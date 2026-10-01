@@ -73,6 +73,12 @@ constexpr unsigned long kRadarRedrawIntervalMs = 250;
 constexpr float kAdsbFetchRadiusScale = 1.0f;
 /** false = hide aircraft with alt_baro "ground"; true = show them too. */
 constexpr bool kAdsbShowGroundAircraft = false;
+/**
+ * Extra serial lines for ADS-B fetches and radar drawing: request URL, drop
+ * reasons, heap around the frame sprite, and why the screen is empty.
+ * Leave false for normal use; set true and rebuild to debug a blank radar.
+ */
+constexpr bool kDebugLog = false;
 
 // --- UI colors (RGB565) — status screens ---
 constexpr uint16_t kColorBlack = 0x0000;

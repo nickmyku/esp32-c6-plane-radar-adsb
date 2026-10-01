@@ -76,7 +76,9 @@ const char* wifiStatusName(wl_status_t status) {
 // duration of the poll. The last frame stays on the panel; drawing resumes
 // once the aircraft list is published.
 void adsbFetchTask(void*) {
-  Serial.println("adsb: fetch task started");
+  if (config::kDebugLog) {
+    Serial.println("adsb: fetch task started");
+  }
   bool reported_down = false;
   for (;;) {
     const wl_status_t status = WiFi.status();
@@ -87,7 +89,7 @@ void adsbFetchTask(void*) {
                                   services::location::lon(),
                                   ui::radar::fetchRadiusKm());
       ui::radarDisplayResumeAfterFetch();
-    } else if (!reported_down) {
+    } else if (config::kDebugLog && !reported_down) {
       Serial.printf("adsb: skip fetch, WiFi %s (%d)\n", wifiStatusName(status),
                     static_cast<int>(status));
       reported_down = true;
@@ -113,13 +115,15 @@ void setup() {
   services::location::init();
   ui::radar::rangeInit();
   services::adsb::init();
-  char range_label[12];
-  ui::radar::formatCurrentRing3Label(range_label, sizeof(range_label));
-  Serial.printf(
-      "Radar: range %s  outer %.1f km  fetch %.1f km  free %u largest %u\n",
-      range_label, ui::radar::rangeCurrent().outer_km, ui::radar::fetchRadiusKm(),
-      static_cast<unsigned>(ESP.getFreeHeap()),
-      static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  if (config::kDebugLog) {
+    char range_label[12];
+    ui::radar::formatCurrentRing3Label(range_label, sizeof(range_label));
+    Serial.printf(
+        "Radar: range %s  outer %.1f km  fetch %.1f km  free %u largest %u\n",
+        range_label, ui::radar::rangeCurrent().outer_km, ui::radar::fetchRadiusKm(),
+        static_cast<unsigned>(ESP.getFreeHeap()),
+        static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  }
 
   if (wifiSetupConnect()) {
     showRadarIfConnected();
