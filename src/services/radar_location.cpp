@@ -47,6 +47,7 @@ void persist(double lat, double lon) {
 }  // namespace
 
 void init() {
+  bool loaded = false;
   Preferences prefs;
   prefs.begin(kPrefsNamespace, true);
   if (prefs.isKey(kKeyLat) && prefs.isKey(kKeyLon)) {
@@ -55,9 +56,12 @@ void init() {
     if (validLatLon(lat, lon)) {
       s_lat = lat;
       s_lon = lon;
+      loaded = true;
     }
   }
   prefs.end();
+  Serial.printf("Radar location: %.6f, %.6f (%s)\n", s_lat, s_lon,
+                loaded ? "saved" : "default");
 }
 
 double lat() { return s_lat; }
