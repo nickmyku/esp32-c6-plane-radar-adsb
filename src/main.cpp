@@ -50,16 +50,18 @@ void handleBootButton() {
   }
 }
 
-// ADS-B fetch runs on its own task: the HTTPS request blocks for ~1-2 s, and
-// keeping it off the main loop lets the radar keep redrawing (dead-reckoned) at
-// 4 Hz throughout. The task publishes into the shared aircraft buffer under a
-// lock; the render loop reads a snapshot.
+// ADS-B fetch runs on its own task. The HTTPS handshake needs the contiguous
+// heap the radar frame occupies, so the UI task frees that sprite for the
+// duration of the poll. The last frame stays on the panel; drawing resumes
+// once the aircraft list is published.
 void adsbFetchTask(void*) {
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
+      ui::radarDisplayPauseForFetch();
       services::adsb::fetchUpdate(services::location::lat(),
                                   services::location::lon(),
                                   ui::radar::fetchRadiusKm());
+      ui::radarDisplayResumeAfterFetch();
     }
     vTaskDelay(pdMS_TO_TICKS(config::kAdsbFetchIntervalMs));
   }
