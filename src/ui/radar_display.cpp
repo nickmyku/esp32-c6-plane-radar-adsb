@@ -696,7 +696,11 @@ bool ensureFrameSprite() {
   if (s_frame_ready) {
     return true;
   }
-  s_frame.setColorDepth(16);
+  // RGB332 is 57 KB of DMA SRAM. RGB565 is 115 KB, and this board has no
+  // PSRAM. After Wi-Fi is up, that 16-bit frame leaves no contiguous heap for
+  // the TLS buffers the ADS-B client needs: the grid draws, and no aircraft
+  // ever arrive. The radar palette fits in 256 colors.
+  s_frame.setColorDepth(lgfx::color_depth_t::rgb332_1Byte);
   if (!s_frame.createSprite(radar::kSize, radar::kSize)) {
     Serial.println("radar: frame sprite alloc failed");
     return false;
